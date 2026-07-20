@@ -169,7 +169,7 @@ public class RestServiceAuthFilter implements Filter {
         if (user_token == null)
             throw new Exception("AuthToken not found");
         HttpSession session = request.getSession();
-        String admin_token = this.microserviceUtils.generateAdminToken(tenantId);
+        String admin_token = this.microserviceUtils.getCachedAdminToken(tenantId);
         if(admin_token==null)
             throw new Exception("SI token generation failed");
         session.setAttribute(MS_USER_TOKEN, user_token);
