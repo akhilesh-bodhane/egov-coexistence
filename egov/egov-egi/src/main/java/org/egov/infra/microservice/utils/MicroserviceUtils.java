@@ -69,6 +69,7 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -669,7 +670,7 @@ public class MicroserviceUtils {
         return user;
     }
 
-    public String generateAdminToken(String tenantId) {
+    private Map<String, Object> fetchAdminTokenFromUserService(String tenantId) {
         final RestTemplate restTemplate = createRestTemplate();
         HttpHeaders header = new HttpHeaders();
         header.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
@@ -686,13 +687,75 @@ public class MicroserviceUtils {
             StringBuilder url = new StringBuilder(appConfigManager.getEgovUserSerHost()).append(tokenGenUrl);
             LOGGER.info("call:" + url);
             Object response = restTemplate.postForObject(url.toString(), request, Object.class);
-            if (response != null)
-                return String.valueOf(((HashMap) response).get("access_token"));
+            return response != null ? (HashMap<String, Object>) response : null;
         } catch (RestClientException e) {
             LOGGER.info("Eror while getting admin authtoken", e);
             return null;
         }
-        return null;
+    }
+
+    public String generateAdminToken(String tenantId) {
+        Map<String, Object> response = fetchAdminTokenFromUserService(tenantId);
+        return response != null ? String.valueOf(response.get("access_token")) : null;
+    }
+
+    private static final String SI_ADMIN_TOKEN_KEY_PREFIX = "si_admin_token:";
+
+    @Value("${si.microservice.token.expiry.buffer.seconds:45}")
+    private long tokenExpiryBufferSeconds;
+
+    @Value("${si.microservice.token.default.ttl.seconds:1800}")
+    private long defaultTokenTtlSeconds;
+
+    private final ConcurrentHashMap<String, Object> adminTokenLocks = new ConcurrentHashMap<>();
+
+    public String getCachedAdminToken(String tenantId) {
+        String key = SI_ADMIN_TOKEN_KEY_PREFIX + tenantId;
+        try {
+            Object cached = redisTemplate.opsForValue().get(key);
+            if (cached != null)
+                return String.valueOf(cached);
+        } catch (Exception e) {
+            LOGGER.info("Redis unavailable while reading cached SI token, falling back to direct fetch", e);
+            return generateAdminToken(tenantId);
+        }
+
+        Object lock = adminTokenLocks.computeIfAbsent(tenantId, t -> new Object());
+        synchronized (lock) {
+            try {
+                Object cached = redisTemplate.opsForValue().get(key);
+                if (cached != null)
+                    return String.valueOf(cached);
+            } catch (Exception e) {
+                LOGGER.info("Redis unavailable while re-checking cached SI token, falling back to direct fetch", e);
+                return generateAdminToken(tenantId);
+            }
+
+            LOGGER.info("SI admin token cache miss/expired for tenant " + tenantId + ", refreshing");
+            Map<String, Object> tokenResponse = fetchAdminTokenFromUserService(tenantId);
+            if (tokenResponse == null || tokenResponse.get("access_token") == null)
+                return null;
+
+            String accessToken = String.valueOf(tokenResponse.get("access_token"));
+            long ttlSeconds = resolveTokenTtlSeconds(tokenResponse.get("expires_in"));
+            try {
+                redisTemplate.opsForValue().set(key, accessToken, ttlSeconds, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOGGER.info("Redis unavailable while caching SI token (token still returned to caller)", e);
+            }
+            return accessToken;
+        }
+    }
+
+    private long resolveTokenTtlSeconds(Object expiresInRaw) {
+        long expiresIn = (expiresInRaw instanceof Number) ? ((Number) expiresInRaw).longValue() : -1;
+        long ttl = expiresIn - tokenExpiryBufferSeconds;
+        if (ttl <= 0) {
+            LOGGER.info("expires_in missing/too small in SI token response, falling back to default TTL of "
+                    + defaultTokenTtlSeconds + "s");
+            return defaultTokenTtlSeconds;
+        }
+        return ttl;
     }
 
     public UserSearchResponse getUserInfo(String auth_token, String tenantId, String userName) {
