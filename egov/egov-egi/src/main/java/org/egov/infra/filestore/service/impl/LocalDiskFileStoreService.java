@@ -51,7 +51,6 @@ package org.egov.infra.filestore.service.impl;
 import org.egov.infra.exception.ApplicationRuntimeException;
 import org.egov.infra.filestore.entity.FileStoreMapper;
 import org.egov.infra.filestore.service.FileStoreService;
-import org.egov.infra.filestore.fileValidation.FileValidatorService;
 import org.slf4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -82,9 +81,6 @@ public class LocalDiskFileStoreService implements FileStoreService {
     private String fileStoreBaseDir;
 
     @Autowired
-    private FileValidatorService fileValidator;
-
-    @Autowired
     public LocalDiskFileStoreService(@Value("${filestore.base.dir}") String fileStoreBaseDir) {
         if (fileStoreBaseDir.isEmpty())
             this.fileStoreBaseDir = getUserDirectoryPath() + separator + "egovfilestore";
@@ -105,8 +101,6 @@ public class LocalDiskFileStoreService implements FileStoreService {
     @Override
     public FileStoreMapper store(byte[] fileBytes, String fileName, String mimeType, String moduleName) {
         try {
-            // validate bytes before storing
-            fileValidator.validateFile(fileBytes, fileName, mimeType);
             FileStoreMapper fileMapper = new FileStoreMapper(randomUUID().toString(), fileName);
             fileMapper.setContentType(mimeType);
             Path newFilePath = this.createNewFilePath(fileMapper, moduleName);
@@ -120,8 +114,6 @@ public class LocalDiskFileStoreService implements FileStoreService {
     @Override
     public FileStoreMapper store(File file, String fileName, String mimeType, String moduleName, boolean deleteFile) {
         try {
-            // validate file before storing
-            fileValidator.validateFile(file, defaultString(fileName, file.getName()), mimeType);
             FileStoreMapper fileMapper = new FileStoreMapper(randomUUID().toString(),
                     defaultString(fileName, file.getName()));
             Path newFilePath = this.createNewFilePath(fileMapper, moduleName);
@@ -139,28 +131,13 @@ public class LocalDiskFileStoreService implements FileStoreService {
     @Override
     public FileStoreMapper store(InputStream fileStream, String fileName, String mimeType, String moduleName, boolean closeStream) {
         try {
-            // We need the size to validate InputStream safely. Copy to a temp file first.
-            final Path temp = Files.createTempFile("filestore-upload-", null);
-            try {
-                Files.copy(fileStream, temp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            } finally {
-                if (closeStream) {
-                    try { fileStream.close(); } catch (IOException ignored) {}
-                }
-            }
-
-            final File tempFile = temp.toFile();
-            try {
-                fileValidator.validateFile(tempFile, fileName, mimeType);
-                FileStoreMapper fileMapper = new FileStoreMapper(randomUUID().toString(), fileName);
-                Path newFilePath = this.createNewFilePath(fileMapper, moduleName);
-                Files.move(temp, newFilePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                fileMapper.setContentType(mimeType);
-                return fileMapper;
-            } finally {
-                // ensure temp file is deleted if move failed
-                try { Files.deleteIfExists(temp); } catch (IOException ignored) {}
-            }
+            FileStoreMapper fileMapper = new FileStoreMapper(randomUUID().toString(), fileName);
+            Path newFilePath = this.createNewFilePath(fileMapper, moduleName);
+            Files.copy(fileStream, newFilePath);
+            fileMapper.setContentType(mimeType);
+            if (closeStream)
+                fileStream.close();
+            return fileMapper;
         } catch (IOException e) {
             throw new ApplicationRuntimeException(String.format(FILE_STORE_ERROR,
                     this.fileStoreBaseDir, getCityCode(), moduleName), e);
