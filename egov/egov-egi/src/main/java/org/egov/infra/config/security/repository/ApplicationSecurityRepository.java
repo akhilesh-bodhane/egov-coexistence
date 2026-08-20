@@ -83,6 +83,10 @@ public class ApplicationSecurityRepository implements SecurityContextRepository 
 			        session.setAttribute(MS_USER_TOKEN, newToken);
 			    }
 			}
+			// Slide the session TTL forward on every request that successfully resolves
+			// a user, so an actively-used session doesn't expire mid-work from the
+			// un-renewed absolute TTL set at login (MicroserviceUtils.setExpire, 30 min).
+			this.microserviceUtils.setExpire(session.getId());
 			LOGGER.info(" ***  Session   found  in redis.... ," + request.getSession().getId());
 			context.setAuthentication(this.prepareAuthenticationObj(request, cur_user));
 		} catch (Exception e) {
@@ -125,6 +129,16 @@ public class ApplicationSecurityRepository implements SecurityContextRepository 
         user_token = request.getParameter("auth_token");
         tenantid = request.getParameter("tenantId");
         HttpSession session = request.getSession();
+        // Fall back to the token already established on this HttpSession when this
+        // particular request (e.g. a background AJAX call) doesn't carry auth_token
+        // as a URL parameter, instead of failing a request from an already-logged-in user.
+        if (user_token == null) {
+            user_token = (String) session.getAttribute(MS_USER_TOKEN);
+        }
+        if (tenantid == null) {
+            Object storedTenantId = session.getAttribute(MS_TENANTID_KEY);
+            tenantid = storedTenantId != null ? storedTenantId.toString() : null;
+        }
         LOGGER.info(" *** authtoken in  getUserDetails()::: "+user_token);
         LOGGER.info(" *** tenant in  getUserDetails()::: "+tenantid);
         if (user_token == null){
